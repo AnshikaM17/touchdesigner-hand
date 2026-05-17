@@ -1,0 +1,410 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>QUANTUM HANDS</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: #000;
+    overflow: hidden;
+    font-family: monospace;
+    color: #6c9;
+  }
+
+  #stage {
+    position: fixed;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+  }
+
+  #cam {
+    position: fixed;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    transform: scaleX(-1);
+  }
+
+  #fx {
+    position: fixed;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    mix-blend-mode: screen;
+  }
+
+  #hud {
+    position: fixed;
+    top: 18px;
+    left: 20px;
+    font-size: 11px;
+    letter-spacing: 1.5px;
+    color: rgba(102, 204, 153, 0.5);
+    text-shadow: 0 0 4px #0a3;
+    pointer-events: none;
+    z-index: 10;
+    line-height: 1.6;
+  }
+
+  #start {
+    position: fixed;
+    inset: 0;
+    z-index: 100;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    background: radial-gradient(ellipse at center, #101030 0%, #000 100%);
+  }
+
+  #start h1 {
+    font-family: monospace;
+    font-size: clamp(18px, 4vw, 36px);
+    letter-spacing: 6px;
+    color: rgba(102, 204, 153, 0.6);
+    text-shadow: 0 0 12px #0a3, 0 0 24px #0a3;
+    margin-bottom: 10px;
+    text-transform: uppercase;
+  }
+
+  #start p {
+    font-size: 11px;
+    letter-spacing: 2px;
+    color: rgba(0, 255, 200, 0.3);
+    margin-bottom: 48px;
+    text-transform: uppercase;
+  }
+
+  #activateBtn {
+    background: transparent;
+    border: 1px solid #0ff;
+    color: #0ff;
+    font-family: monospace;
+    font-size: 13px;
+    text-transform: uppercase;
+    letter-spacing: 2px;
+    padding: 14px 32px;
+    cursor: pointer;
+    box-shadow:
+      0 0 8px rgba(0,255,255,0.4),
+      inset 0 0 8px rgba(0,255,255,0.1);
+    transition: box-shadow 0.2s ease, color 0.2s ease;
+    outline: none;
+  }
+
+  #activateBtn:hover {
+    color: #fff;
+    box-shadow:
+      0 0 24px rgba(0,255,255,0.8),
+      0 0 48px rgba(0,255,255,0.4),
+      inset 0 0 20px rgba(0,255,255,0.25);
+  }
+
+  #status {
+    position: fixed;
+    bottom: 18px;
+    left: 20px;
+    font-size: 10px;
+    letter-spacing: 1px;
+    color: rgba(102, 204, 153, 0.3);
+    pointer-events: none;
+    z-index: 10;
+  }
+</style>
+</head>
+<body>
+
+<div id="start">
+  <h1>Quantum Hands</h1>
+  <p>biometric augmentation layer v0.1</p>
+  <button id="activateBtn">Activate Camera</button>
+</div>
+
+<div id="stage">
+  <video id="cam" playsinline muted></video>
+  <canvas id="fx"></canvas>
+</div>
+
+<div id="hud">
+  QUANTUM HANDS // move your hands
+</div>
+
+<div id="status" id="status">INITIALIZING...</div>
+
+<script type="module">
+import { HandLandmarker, FilesetResolver } from
+  'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs';
+
+const cam   = document.getElementById('cam');
+const fx    = document.getElementById('fx');
+const ctx   = fx.getContext('2d');
+const start = document.getElementById('start');
+const btn   = document.getElementById('activateBtn');
+const statusEl = document.getElementById('status');
+
+// Canvas sizing
+function resize() {
+  fx.width  = window.innerWidth;
+  fx.height = window.innerHeight;
+}
+resize();
+window.addEventListener('resize', resize);
+
+// Hand skeleton topology (MediaPipe 21-pt)
+const EDGES = [
+  [0,1],[1,2],[2,3],[3,4],
+  [0,5],[5,6],[6,7],[7,8],
+  [5,9],[9,10],[10,11],[11,12],
+  [9,13],[13,14],[14,15],[15,16],
+  [13,17],[17,18],[18,19],[19,20],
+  [0,17]
+];
+
+const FINGERTIP_IDX = [4, 8, 12, 16, 20];
+
+let handLandmarker = null;
+let lastVideoTime  = -1;
+let t = 0;
+let animating = false;
+
+// ── init MediaPipe ──────────────────────────────────────────────────────────
+async function initMP() {
+  statusEl.textContent = 'LOADING MODEL...';
+  const vision = await FilesetResolver.forVisionTasks(
+    'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm'
+  );
+  handLandmarker = await HandLandmarker.createFromOptions(vision, {
+    baseOptions: {
+      modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task',
+      delegate: 'GPU'
+    },
+    runningMode: 'VIDEO',
+    numHands: 2
+  });
+  statusEl.textContent = 'MODEL READY';
+}
+
+// ── activate button ─────────────────────────────────────────────────────────
+btn.addEventListener('click', async () => {
+  start.remove();
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { width: 1280, height: 720, facingMode: 'user' },
+      audio: false
+    });
+    cam.srcObject = stream;
+    await cam.play();
+    statusEl.textContent = 'CAMERA ACTIVE';
+    await initMP();
+    statusEl.textContent = '';
+    animating = true;
+    requestAnimationFrame(loop);
+  } catch(e) {
+    statusEl.textContent = 'ERROR: ' + e.message;
+  }
+});
+
+// ── helpers ─────────────────────────────────────────────────────────────────
+function dist(a, b) {
+  const dx = a.x - b.x, dy = a.y - b.y;
+  return Math.sqrt(dx*dx + dy*dy);
+}
+
+function r() { return Math.random(); }
+
+function drawEdges(pts, hue) {
+  for (const [a, b] of EDGES) {
+    const ax = pts[a].x, ay = pts[a].y;
+    const bx = pts[b].x, by = pts[b].y;
+
+    // outer glow
+    ctx.beginPath();
+    ctx.lineCap = 'round';
+    ctx.strokeStyle = `hsla(${hue},70%,40%,0.08)`;
+    ctx.lineWidth = 18;
+    ctx.moveTo(ax, ay); ctx.lineTo(bx, by);
+    ctx.stroke();
+
+    // mid
+    ctx.beginPath();
+    ctx.strokeStyle = `hsla(${hue},70%,45%,0.2)`;
+    ctx.lineWidth = 6;
+    ctx.moveTo(ax, ay); ctx.lineTo(bx, by);
+    ctx.stroke();
+
+    // core
+    ctx.beginPath();
+    ctx.strokeStyle = `hsla(${hue},60%,55%,0.5)`;
+    ctx.lineWidth = 1;
+    ctx.moveTo(ax, ay); ctx.lineTo(bx, by);
+    ctx.stroke();
+  }
+}
+
+function drawJoints(pts, hue) {
+  ctx.fillStyle = `hsla(${hue},60%,50%,0.5)`;
+  for (const p of pts) {
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, 2.5, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+function drawTipOrbs(pts, hue) {
+  for (const idx of FINGERTIP_IDX) {
+    const p = pts[idx];
+    const grad = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, 32);
+    grad.addColorStop(0,   `hsla(${hue},60%,55%,0.45)`);
+    grad.addColorStop(0.5, `hsla(${hue},70%,40%,0.2)`);
+    grad.addColorStop(1,   `hsla(${hue},70%,30%,0)`);
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, 32, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+function drawGlitchDots(pts, hue) {
+  for (let i = 0; i < 14; i++) {
+    const anchor = pts[Math.floor(r() * 21)];
+    const angle  = r() * Math.PI * 2;
+    const dist2  = 8 + r() * 70;
+    const gx = Math.round(anchor.x + Math.cos(angle) * dist2);
+    const gy = Math.round(anchor.y + Math.sin(angle) * dist2);
+    const sz = r() < 0.15 ? 3 : (r() < 0.5 ? 2 : 1);
+    const alpha = 0.3 + r() * 0.4;
+    const lum   = 40 + Math.round(r() * 25);
+    const h2    = hue + (r() * 30 - 15);
+    ctx.fillStyle = `hsla(${h2},60%,${lum}%,${alpha.toFixed(2)})`;
+    ctx.fillRect(gx, gy, sz, 3);
+  }
+}
+
+function drawPinchArc(pts, hue) {
+  const a = pts[4], b = pts[8];
+  if (dist(a, b) >= 50) return;
+  ctx.beginPath();
+  ctx.strokeStyle = `hsla(${hue},60%,55%,0.5)`;
+  ctx.lineWidth = 1.5;
+  ctx.lineCap = 'round';
+  const segs = 8;
+  ctx.moveTo(a.x, a.y);
+  for (let i = 1; i < segs; i++) {
+    const frac = i / segs;
+    const mx = a.x + (b.x - a.x) * frac + (r() - 0.5) * 20;
+    const my = a.y + (b.y - a.y) * frac + (r() - 0.5) * 20;
+    ctx.lineTo(mx, my);
+  }
+  ctx.lineTo(b.x, b.y);
+  ctx.stroke();
+}
+
+function drawRibbons(tips, t) {
+  if (tips.length < 10) return;
+  for (let i = 0; i < 5; i++) {
+    const a = tips[i];
+    const b = tips[i + 5];
+    const hue2 = 110 + Math.sin(t + i) * 30;
+
+    // outer glow
+    ctx.beginPath();
+    ctx.strokeStyle = `hsla(${hue2},85%,55%,0.18)`;
+    ctx.lineWidth = 8;
+    ctx.lineCap = 'round';
+    ctx.moveTo(a.x, a.y);
+    ctx.lineTo(b.x, b.y);
+    ctx.stroke();
+
+    // glitchy core — 14 sub-segments
+    const segs = 14;
+    ctx.lineWidth = 1.5;
+    for (let s = 0; s < segs; s++) {
+      if (r() < 0.22) continue;
+      const f0 = s / segs, f1 = (s + 1) / segs;
+      const x0 = a.x + (b.x - a.x) * f0 + (r() - 0.5) * 6;
+      const y0 = a.y + (b.y - a.y) * f0 + (r() - 0.5) * 6;
+      const x1 = a.x + (b.x - a.x) * f1 + (r() - 0.5) * 6;
+      const y1 = a.y + (b.y - a.y) * f1 + (r() - 0.5) * 6;
+      const lum   = 65 + Math.round(r() * 25);
+      const alpha = 0.75 + r() * 0.25;
+      const ch    = 110 + r() * 30 - 10;
+      ctx.beginPath();
+      ctx.strokeStyle = `hsla(${ch},95%,${lum}%,${alpha.toFixed(2)})`;
+      ctx.moveTo(x0, y0);
+      ctx.lineTo(x1, y1);
+      ctx.stroke();
+    }
+
+    // 25% chance chromatic ghost
+    if (r() < 0.25) {
+      const ox = (r() - 0.5) * 6;
+      const gh = 60 + r() * 30;
+      ctx.beginPath();
+      ctx.strokeStyle = `hsla(${gh},95%,70%,0.55)`;
+      ctx.lineWidth = 1;
+      ctx.moveTo(a.x + ox, a.y);
+      ctx.lineTo(b.x + ox, b.y);
+      ctx.stroke();
+    }
+  }
+}
+
+// ── main render loop ─────────────────────────────────────────────────────────
+function loop() {
+  if (!animating) return;
+  requestAnimationFrame(loop);
+  t += 0.016;
+
+  // 1. fade trails
+  ctx.globalCompositeOperation = 'destination-out';
+  ctx.fillStyle = 'rgba(0,0,0,0.18)';
+  ctx.fillRect(0, 0, fx.width, fx.height);
+
+  ctx.globalCompositeOperation = 'lighter';
+
+  // detect hands
+  if (!handLandmarker || cam.readyState < 2) return;
+  const now = performance.now();
+  if (now === lastVideoTime) return;
+  lastVideoTime = now;
+
+  const result = handLandmarker.detectForVideo(cam, now);
+  const hands  = result.landmarks ?? [];
+
+  const tips = [];
+
+  for (let hi = 0; hi < hands.length; hi++) {
+    const raw  = hands[hi];
+    const hue  = hi === 0 ? 130 : 90;
+
+    // mirror landmarks
+    const pts = raw.map(p => ({
+      x: (1 - p.x) * fx.width,
+      y: p.y * fx.height
+    }));
+
+    // 3. skeleton
+    drawEdges(pts, hue);
+    // 4. joints
+    drawJoints(pts, hue);
+    // 5. tip orbs + collect tips
+    drawTipOrbs(pts, hue);
+    for (const idx of FINGERTIP_IDX) tips.push(pts[idx]);
+    // 6. glitch dots
+    drawGlitchDots(pts, hue);
+    // 7. pinch arc
+    drawPinchArc(pts, hue);
+  }
+
+  // 8. inter-hand ribbons
+  drawRibbons(tips, t);
+}
+</script>
+</body>
+</html>
